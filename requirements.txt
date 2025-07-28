@@ -1,0 +1,8 @@
+flask
+pillow
+pywin32
+psutil
+requests
+python-telegram-bot
+pyinstaller
+pywin32-ctypes
